@@ -44,7 +44,7 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
 PLIST
 
 echo "Compiling..."
-swiftc -O -parse-as-library=false main.swift -o "$APP/Contents/MacOS/$BIN"
+swiftc -O main.swift -o "$APP/Contents/MacOS/$BIN"
 
 # Ad-hoc signature keeps macOS from complaining about an unsigned binary.
 # (No --deep: there's nothing nested in this bundle to sign recursively.)
