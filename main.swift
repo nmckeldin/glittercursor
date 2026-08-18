@@ -47,6 +47,7 @@ enum Palette: String, CaseIterable {
     case gold = "Gold rush"
     case frost = "Frost"
     case rainbow = "Rainbow"
+    case dragon = "Dragon's Breath"
 
     var colors: [NSColor] {
         switch self {
@@ -58,6 +59,8 @@ enum Palette: String, CaseIterable {
             return [hex(0xa5f3fc), hex(0xe0f2fe), hex(0x7dd3fc), hex(0xc4b5fd), .white]
         case .rainbow:
             return [hex(0xff5f6d), hex(0xffc371), hex(0x8de969), hex(0x63e6e2), hex(0x7aa2ff), hex(0xc084fc)]
+        case .dragon:
+            return [hex(0x8b0000), hex(0xd7263d), hex(0xff6b35), hex(0xffb703), hex(0xfff3b0)]
         }
     }
 
