@@ -246,6 +246,12 @@ final class OverlayWindow: NSWindow {
     /// for the other half of that fix).
     var onEscape: (() -> Void)?
 
+    /// Scopes canBecomeKey to exactly when it's needed (Annotate Mode),
+    /// rather than being unconditionally true, to keep .pointer mode's
+    /// behavior as close to the original click-through-only design as
+    /// possible.
+    var isAnnotating: () -> Bool = { false }
+
     init(frame: NSRect) {
         super.init(contentRect: frame, styleMask: .borderless, backing: .buffered, defer: false)
         isOpaque = false
@@ -268,12 +274,11 @@ final class OverlayWindow: NSWindow {
         contentView = view
     }
 
-    // Needs to become key so it can receive Escape via keyDown below —
-    // this costs no permission (a window becoming key in its own app is
-    // completely normal) and is harmless in .pointer mode, since
-    // ignoresMouseEvents there means no click ever reaches this window to
-    // make it key in the first place.
-    override var canBecomeKey: Bool { true }
+    // True only while Annotate Mode is active, so it can receive Escape via
+    // keyDown below. Costs no permission (a window becoming key in its own
+    // app is completely normal) and leaves .pointer mode's key-window
+    // behavior untouched from before.
+    override var canBecomeKey: Bool { isAnnotating() }
     override var canBecomeMain: Bool { false }
 
     override func keyDown(with event: NSEvent) {
@@ -344,7 +349,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, AnnotationDrawing {
     private var deskFrame: NSRect {
         guard let first = NSScreen.screens.first else { return .zero }
         let union = NSScreen.screens.dropFirst().reduce(first.frame) { $0.union($1.frame) }
-        let menuBarHeight = first.frame.maxY - first.visibleFrame.maxY
+        // Clamped to a plausible menu-bar-height range (24-38pt on real
+        // Macs) so an unusual screen/Dock arrangement can't collapse or
+        // distort the whole overlay -- worst case we just don't exclude
+        // the strip, rather than break everything.
+        let menuBarHeight = min(max(first.frame.maxY - first.visibleFrame.maxY, 0), 60)
         return NSRect(x: union.minX, y: union.minY,
                       width: union.width, height: union.height - menuBarHeight)
     }
@@ -387,6 +396,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, AnnotationDrawing {
         window.setFrame(frame, display: false)
         window.orderFrontRegardless()
         window.onEscape = { [weak self] in self?.exitAnnotateMode() }
+        window.isAnnotating = { [weak self] in self?.mode == .annotate }
         applyEffectVisibility()
     }
 
