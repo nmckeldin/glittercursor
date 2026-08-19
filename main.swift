@@ -218,6 +218,8 @@ protocol AnnotationDrawing: AnyObject {
 final class OverlayContentView: NSView {
     weak var annotationDelegate: AnnotationDrawing?
 
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+
     override func mouseDown(with event: NSEvent) {
         annotationDelegate?.annotationBegin(at: convert(event.locationInWindow, from: nil))
     }
@@ -254,7 +256,6 @@ final class OverlayWindow: NSWindow {
 
     override var canBecomeKey: Bool { false }
     override var canBecomeMain: Bool { false }
-    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 }
 
 // MARK: - App
