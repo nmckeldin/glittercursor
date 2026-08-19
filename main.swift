@@ -372,7 +372,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, AnnotationDrawing {
     private func updateCursorVisibility() {
         let shouldHide = isOn && mode == .pointer && effect == .laser
         if shouldHide && !cursorHidden {
-            CGDisplayHideCursor(CGMainDisplayID())
+            // TEMPORARY DIAGNOSTIC: CGDisplayHideCursor returns a CGError
+            // we've been silently discarding. Two prior fixes both failed
+            // with zero visible effect, so surface the actual result
+            // instead of guessing again -- flashes e.g. "hide:0" (reported
+            // success) or a nonzero code (an actual failure reason).
+            let result = CGDisplayHideCursor(CGMainDisplayID())
+            flashStatusItem("hide:\(result.rawValue)")
             cursorHidden = true
         } else if !shouldHide && cursorHidden {
             CGDisplayShowCursor(CGMainDisplayID())
