@@ -6,7 +6,8 @@ training. It overlays your whole desktop with:
 - **Cursor pointer effects** — Glitter (sparkle trail), Click Ripple
   (expanding ring on every click, great for showing remote viewers exactly
   where/when you clicked), Spotlight (dims everything except a circle
-  around your cursor), or Laser Pointer (a simple glowing tracking dot).
+  around your cursor), or Laser Pointer (a simple glowing tracking dot —
+  hides the system cursor while active, so it's not redundant with it).
 - **Annotate Mode** — draw freehand on top of whatever you're presenting,
   in a choice of colors, with undo and clear-all.
 - **Hotkeys** to switch effects without touching the mouse, so you never

@@ -318,6 +318,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, AnnotationDrawing {
     private var annotationColor: AnnotationColor = Prefs.annotationColor
     private var isOn: Bool = Prefs.isOn
     private var mode: Mode = .pointer
+    private var cursorHidden = false
 
     func applicationDidFinishLaunching(_ note: Notification) {
         buildWindow()
@@ -325,6 +326,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, AnnotationDrawing {
         start()
         installClickMonitor()
         installHotKeys()
+        updateCursorVisibility()   // in case Laser Pointer was the persisted effect
 
         NotificationCenter.default.addObserver(
             self,
@@ -336,6 +338,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate, AnnotationDrawing {
     func applicationWillTerminate(_ notification: Notification) {
         for ref in hotKeyRefs {
             if let ref = ref { UnregisterEventHotKey(ref) }
+        }
+        if cursorHidden { NSCursor.unhide() }   // never leave the user's cursor hidden on quit
+    }
+
+    /// Laser Pointer draws its own dot, so the system arrow next to it is
+    /// redundant -- hide it while that effect is active and on, and
+    /// nowhere else (Annotate Mode needs the real cursor to draw with).
+    /// NSCursor.hide()/unhide() must stay balanced -- this tracks our own
+    /// state so repeated calls (e.g. from both a hotkey and the menu) never
+    /// double-hide or double-unhide. macOS itself may force the cursor back
+    /// on during some app-switching/Spaces transitions, as a safety net
+    /// against apps hiding it forever -- that's OS behavior, not a bug;
+    /// worst case it flickers back and re-hides on the next update here.
+    private func updateCursorVisibility() {
+        let shouldHide = isOn && mode == .pointer && effect == .laser
+        if shouldHide && !cursorHidden {
+            NSCursor.hide()
+            cursorHidden = true
+        } else if !shouldHide && cursorHidden {
+            NSCursor.unhide()
+            cursorHidden = false
         }
     }
 
@@ -693,6 +716,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, AnnotationDrawing {
         isOn.toggle()
         Prefs.isOn = isOn
         sender.state = isOn ? .on : .off
+        updateCursorVisibility()
         if !isOn {
             CATransaction.begin()
             CATransaction.setDisableActions(true)
@@ -713,6 +737,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, AnnotationDrawing {
         Prefs.effect = picked
         effectMenu?.items.forEach { $0.state = ($0.representedObject as? String == picked.rawValue) ? .on : .off }
         flashStatusItem(picked.rawValue)
+        updateCursorVisibility()
 
         // Annotate Mode owns layer visibility while it's active (see
         // enterAnnotateMode/exitAnnotateMode) -- leave it alone here so a
@@ -753,6 +778,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, AnnotationDrawing {
         window.ignoresMouseEvents = false
         window.makeKey()   // lets Escape reach keyDown below, no permission needed
         annotateMenuItem?.state = .on
+        updateCursorVisibility()   // always show the real cursor while drawing
 
         CATransaction.begin()
         CATransaction.setDisableActions(true)
@@ -770,6 +796,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, AnnotationDrawing {
         mode = .pointer
         window.ignoresMouseEvents = true
         annotateMenuItem?.state = .off
+        updateCursorVisibility()
 
         CATransaction.begin()
         CATransaction.setDisableActions(true)
