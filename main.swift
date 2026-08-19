@@ -1,11 +1,20 @@
 //
-//  Glitter — a system-wide sparkle trail for macOS
+//  Glitter — a system-wide cursor overlay for macOS: sparkle trails, a
+//  click-ripple / spotlight / laser pointer, and click-and-drag
+//  annotations for screen-shared demos and training.
 //
 //  A transparent, click-through overlay window floats above every app and
-//  draws particles wherever your cursor goes. Lives in the menu bar.
+//  draws pointer effects wherever your cursor goes. Toggle "Annotate Mode"
+//  from the menu bar to switch the window from click-through to
+//  click-capturing, so you can draw on top of whatever you're presenting;
+//  toggle it off to resume normal interaction with the app underneath.
 //
-//  No accessibility permissions needed: the cursor position is polled with
-//  NSEvent.mouseLocation rather than intercepted with an event tap.
+//  No special permissions needed: cursor position is polled with
+//  NSEvent.mouseLocation, and clicks are observed with a global mouse
+//  monitor — neither requires Accessibility or Input Monitoring access.
+//  (A global keyboard hotkey for Annotate Mode was deliberately left out:
+//  that would require Input Monitoring permission, which felt like too
+//  high a cost for a personal tool. Reachable from the menu bar instead.)
 //
 //  Build:  ./build.sh     Run:  open Glitter.app     Quit: menu bar ✨ → Quit
 //
@@ -17,7 +26,7 @@ import QuartzCore
 
 /// Every value below can be overridden without recompiling, e.g.:
 ///   defaults write local.glitter.cursor birthRate -float 400
-///   defaults write local.glitter.cursor gravity -float -220
+///   defaults write local.glitter.cursor spotlightRadius -float 180
 /// Delete an override to fall back to the built-in default:
 ///   defaults delete local.glitter.cursor birthRate
 private extension UserDefaults {
@@ -32,6 +41,7 @@ private extension UserDefaults {
 enum Config {
     private static let d = UserDefaults.standard
 
+    // Glitter effect
     static var birthRate: Float = d.tunable("birthRate", 240)              // specks per second while moving
     static var lifetime: Float = d.tunable("lifetime", 1.25)               // seconds a speck survives
     static var scale: CGFloat = d.tunable("scale", 0.42)                   // base speck size
@@ -40,7 +50,23 @@ enum Config {
     static var spin: CGFloat = d.tunable("spin", 3.0)                      // radians per second
     static var minSpeed: CGFloat = d.tunable("minSpeed", 0.6)              // cursor speed below this = no glitter
     static var speedForFullRate: CGFloat = d.tunable("speedForFullRate", 26)
+
+    // Spotlight effect
+    static var spotlightRadius: CGFloat = d.tunable("spotlightRadius", 130)
+    static var spotlightDim: CGFloat = d.tunable("spotlightDim", 0.55)     // 0-1, how dark the surrounding area is
+
+    // Click ripple / laser pointer
+    static var rippleMaxRadius: CGFloat = d.tunable("rippleMaxRadius", 46)
+    static var rippleDuration: Float = d.tunable("rippleDuration", 0.5)
+    static var laserDotRadius: CGFloat = d.tunable("laserDotRadius", 7)
+
+    // Annotations
+    static var annotationWidth: CGFloat = d.tunable("annotationWidth", 4)
 }
+
+/// Signal color for the ripple/laser pointer — deliberately fixed (not a
+/// Palette color) so it always reads as "presenter pointer," not "party."
+private let pointerColor = NSColor(srgbRed: 1, green: 0.23, blue: 0.19, alpha: 1)
 
 enum Palette: String, CaseIterable {
     case party = "Party"
@@ -72,13 +98,51 @@ enum Palette: String, CaseIterable {
     }
 }
 
+/// What the cursor draws as you move it. Only one is active at a time.
+enum PointerEffect: String, CaseIterable {
+    case glitter = "Glitter"
+    case ripple = "Click Ripple"
+    case spotlight = "Spotlight"
+    case laser = "Laser Pointer"
+}
+
+enum AnnotationColor: String, CaseIterable {
+    case red = "Red"
+    case yellow = "Yellow"
+    case green = "Green"
+    case blue = "Blue"
+    case white = "White"
+
+    var color: NSColor {
+        switch self {
+        case .red: return NSColor(srgbRed: 1, green: 0.23, blue: 0.19, alpha: 1)
+        case .yellow: return NSColor(srgbRed: 1, green: 0.80, blue: 0.0, alpha: 1)
+        case .green: return NSColor(srgbRed: 0.20, green: 0.78, blue: 0.35, alpha: 1)
+        case .blue: return NSColor(srgbRed: 0.0, green: 0.48, blue: 1.0, alpha: 1)
+        case .white: return .white
+        }
+    }
+}
+
+/// .pointer: click-through, draws pointer effects (today's default).
+/// .annotate: captures clicks itself so you can draw; nothing reaches the
+/// app underneath until you switch back.
+enum Mode {
+    case pointer
+    case annotate
+}
+
 // MARK: - Persisted state
 
-/// Keeps the on/off toggle and chosen palette across launches.
+/// Keeps preferences across launches. Mode is intentionally NOT persisted —
+/// every launch starts in .pointer so you never accidentally open into a
+/// state where clicks don't reach your other apps.
 private enum Prefs {
     private static let d = UserDefaults.standard
     private static let onKey = "GlitterOn"
     private static let paletteKey = "GlitterPalette"
+    private static let effectKey = "GlitterEffect"
+    private static let annotationColorKey = "GlitterAnnotationColor"
 
     static var isOn: Bool {
         get { d.object(forKey: onKey) != nil ? d.bool(forKey: onKey) : true }
@@ -88,6 +152,16 @@ private enum Prefs {
     static var palette: Palette {
         get { Palette(rawValue: d.string(forKey: paletteKey) ?? "") ?? .party }
         set { d.set(newValue.rawValue, forKey: paletteKey) }
+    }
+
+    static var effect: PointerEffect {
+        get { PointerEffect(rawValue: d.string(forKey: effectKey) ?? "") ?? .glitter }
+        set { d.set(newValue.rawValue, forKey: effectKey) }
+    }
+
+    static var annotationColor: AnnotationColor {
+        get { AnnotationColor(rawValue: d.string(forKey: annotationColorKey) ?? "") ?? .red }
+        set { d.set(newValue.rawValue, forKey: annotationColorKey) }
     }
 }
 
@@ -131,7 +205,29 @@ func sparkleTexture(_ side: Int = 48) -> CGImage {
     return ctx.makeImage()!
 }
 
+// MARK: - Annotation drawing
+
+protocol AnnotationDrawing: AnyObject {
+    func annotationBegin(at point: CGPoint)
+    func annotationDrag(to point: CGPoint)
+    func annotationEnd()
+}
+
 // MARK: - Overlay window
+
+final class OverlayContentView: NSView {
+    weak var annotationDelegate: AnnotationDrawing?
+
+    override func mouseDown(with event: NSEvent) {
+        annotationDelegate?.annotationBegin(at: convert(event.locationInWindow, from: nil))
+    }
+    override func mouseDragged(with event: NSEvent) {
+        annotationDelegate?.annotationDrag(to: convert(event.locationInWindow, from: nil))
+    }
+    override func mouseUp(with event: NSEvent) {
+        annotationDelegate?.annotationEnd()
+    }
+}
 
 final class OverlayWindow: NSWindow {
     init(frame: NSRect) {
@@ -139,7 +235,7 @@ final class OverlayWindow: NSWindow {
         isOpaque = false
         backgroundColor = .clear
         hasShadow = false
-        ignoresMouseEvents = true            // clicks pass straight through
+        ignoresMouseEvents = true            // clicks pass straight through in .pointer mode
         isReleasedWhenClosed = false
         // .statusBar sits above normal app windows (and, combined with
         // .fullScreenAuxiliary below, above full-screen apps too) without
@@ -148,7 +244,8 @@ final class OverlayWindow: NSWindow {
         level = .statusBar
         collectionBehavior = [.canJoinAllSpaces, .stationary, .fullScreenAuxiliary, .ignoresCycle]
 
-        let view = NSView(frame: NSRect(origin: .zero, size: frame.size))
+        let view = OverlayContentView(frame: NSRect(origin: .zero, size: frame.size))
+        view.autoresizingMask = [.width, .height]   // track window size across display changes
         view.wantsLayer = true
         view.layer = CALayer()
         view.layer?.isOpaque = false
@@ -157,26 +254,39 @@ final class OverlayWindow: NSWindow {
 
     override var canBecomeKey: Bool { false }
     override var canBecomeMain: Bool { false }
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 }
 
 // MARK: - App
 
-final class AppDelegate: NSObject, NSApplicationDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, AnnotationDrawing {
 
     private var window: OverlayWindow!
     private var emitter = CAEmitterLayer()
     private let texture = sparkleTexture()
     private var statusItem: NSStatusItem!
     private var timer: Timer?
+    private var clickMonitor: Any?
+
+    private var rippleContainer = CALayer()
+    private var spotlightLayer = CAShapeLayer()
+    private var laserDot = CAShapeLayer()
+    private var annotationLayer = CALayer()
+    private var strokeLayers: [CAShapeLayer] = []
+    private var currentStroke: (path: CGMutablePath, layer: CAShapeLayer)?
 
     private var lastPoint = NSEvent.mouseLocation
     private var palette: Palette = Prefs.palette
+    private var effect: PointerEffect = Prefs.effect
+    private var annotationColor: AnnotationColor = Prefs.annotationColor
     private var isOn: Bool = Prefs.isOn
+    private var mode: Mode = .pointer
 
     func applicationDidFinishLaunching(_ note: Notification) {
         buildWindow()
         buildMenuBar()
         start()
+        installClickMonitor()
 
         NotificationCenter.default.addObserver(
             self,
@@ -194,6 +304,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func buildWindow() {
         let frame = deskFrame
         window = OverlayWindow(frame: frame)
+        (window.contentView as? OverlayContentView)?.annotationDelegate = self
+
+        guard let rootLayer = window.contentView?.layer else { return }
 
         emitter.frame = CGRect(origin: .zero, size: frame.size)
         emitter.emitterShape = .point
@@ -201,10 +314,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         emitter.renderMode = .additive       // specks glow where they overlap
         emitter.birthRate = 0                // multiplier, driven by cursor speed
         emitter.emitterCells = makeCells()
+        rootLayer.addSublayer(emitter)
 
-        window.contentView?.layer?.addSublayer(emitter)
+        rippleContainer.frame = CGRect(origin: .zero, size: frame.size)
+        rootLayer.addSublayer(rippleContainer)
+
+        laserDot.fillColor = pointerColor.cgColor
+        laserDot.shadowColor = pointerColor.cgColor
+        laserDot.shadowRadius = 8
+        laserDot.shadowOpacity = 0.9
+        laserDot.shadowOffset = .zero
+        laserDot.isHidden = true
+        rootLayer.addSublayer(laserDot)
+
+        spotlightLayer.frame = CGRect(origin: .zero, size: frame.size)
+        spotlightLayer.fillColor = NSColor.black.withAlphaComponent(Config.spotlightDim).cgColor
+        spotlightLayer.fillRule = .evenOdd
+        spotlightLayer.isHidden = true
+        rootLayer.addSublayer(spotlightLayer)
+
+        annotationLayer.frame = CGRect(origin: .zero, size: frame.size)
+        rootLayer.addSublayer(annotationLayer)   // drawn last: always on top
+
         window.setFrame(frame, display: false)
         window.orderFrontRegardless()
+        applyEffectVisibility()
     }
 
     private func makeCells() -> [CAEmitterCell] {
@@ -234,19 +368,40 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    /// Shows/hides each effect's layer to match the current selection.
+    /// Does not touch Annotate mode's layers.
+    private func applyEffectVisibility() {
+        emitter.isHidden = effect != .glitter
+        if effect != .glitter { emitter.birthRate = 0 }
+        laserDot.isHidden = effect != .laser
+        spotlightLayer.isHidden = effect != .spotlight
+    }
+
     private func buildMenuBar() {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         statusItem.button?.title = "✨"
 
         let menu = NSMenu()
 
-        let toggle = NSMenuItem(title: "Glitter", action: #selector(toggleGlitter), keyEquivalent: "")
+        let toggle = NSMenuItem(title: "Cursor Effects", action: #selector(toggleEffects), keyEquivalent: "")
         toggle.target = self
         toggle.state = isOn ? .on : .off
         menu.addItem(toggle)
         menu.addItem(.separator())
 
-        let paletteItem = NSMenuItem(title: "Palette", action: nil, keyEquivalent: "")
+        let effectItem = NSMenuItem(title: "Effect", action: nil, keyEquivalent: "")
+        let effectMenu = NSMenu()
+        for e in PointerEffect.allCases {
+            let item = NSMenuItem(title: e.rawValue, action: #selector(chooseEffect(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = e.rawValue
+            item.state = (e == effect) ? .on : .off
+            effectMenu.addItem(item)
+        }
+        effectItem.submenu = effectMenu
+        menu.addItem(effectItem)
+
+        let paletteItem = NSMenuItem(title: "Glitter Palette", action: nil, keyEquivalent: "")
         let paletteMenu = NSMenu()
         for p in Palette.allCases {
             let item = NSMenuItem(title: p.rawValue, action: #selector(choosePalette(_:)), keyEquivalent: "")
@@ -257,6 +412,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         paletteItem.submenu = paletteMenu
         menu.addItem(paletteItem)
+        menu.addItem(.separator())
+
+        let annotate = NSMenuItem(title: "Annotate Mode", action: #selector(toggleAnnotateMode(_:)), keyEquivalent: "")
+        annotate.target = self
+        annotate.state = .off
+        menu.addItem(annotate)
+
+        let colorItem = NSMenuItem(title: "Annotation Color", action: nil, keyEquivalent: "")
+        let colorMenu = NSMenu()
+        for c in AnnotationColor.allCases {
+            let item = NSMenuItem(title: c.rawValue, action: #selector(chooseAnnotationColor(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = c.rawValue
+            item.state = (c == annotationColor) ? .on : .off
+            colorMenu.addItem(item)
+        }
+        colorItem.submenu = colorMenu
+        menu.addItem(colorItem)
+
+        let undo = NSMenuItem(title: "Undo Last Stroke", action: #selector(undoStroke), keyEquivalent: "z")
+        undo.target = self
+        menu.addItem(undo)
+
+        let clear = NSMenuItem(title: "Clear Annotations", action: #selector(clearAnnotations), keyEquivalent: "")
+        clear.target = self
+        menu.addItem(clear)
         menu.addItem(.separator())
 
         let quit = NSMenuItem(title: "Quit Glitter", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
@@ -271,8 +452,56 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         timer = t
     }
 
+    /// Observes clicks in every other app (no permission required for
+    /// mouse events) so Ripple/Laser can react to clicks made anywhere,
+    /// even though our window itself is click-through in .pointer mode.
+    private func installClickMonitor() {
+        clickMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] event in
+            self?.handleGlobalClick(rightButton: event.type == .rightMouseDown)
+        }
+    }
+
+    private func handleGlobalClick(rightButton: Bool) {
+        guard isOn, mode == .pointer, effect == .ripple || effect == .laser else { return }
+        let p = NSEvent.mouseLocation
+        let origin = window.frame.origin
+        let local = CGPoint(x: p.x - origin.x, y: p.y - origin.y)
+        spawnRipple(at: local, rightButton: rightButton)
+    }
+
+    private func spawnRipple(at point: CGPoint, rightButton: Bool) {
+        let startRadius: CGFloat = 6
+        let ring = CAShapeLayer()
+        ring.frame = CGRect(x: point.x - startRadius, y: point.y - startRadius,
+                             width: startRadius * 2, height: startRadius * 2)
+        ring.path = CGPath(ellipseIn: CGRect(origin: .zero, size: ring.frame.size), transform: nil)
+        ring.fillColor = nil
+        ring.strokeColor = (rightButton ? NSColor.systemBlue : pointerColor).cgColor
+        ring.lineWidth = 3
+        rippleContainer.addSublayer(ring)
+
+        let scale = CABasicAnimation(keyPath: "transform.scale")
+        scale.fromValue = 1.0
+        scale.toValue = Config.rippleMaxRadius / startRadius
+        let fade = CABasicAnimation(keyPath: "opacity")
+        fade.fromValue = 1.0
+        fade.toValue = 0.0
+
+        let group = CAAnimationGroup()
+        group.animations = [scale, fade]
+        group.duration = CFTimeInterval(Config.rippleDuration)
+        group.timingFunction = CAMediaTimingFunction(name: .easeOut)
+        group.isRemovedOnCompletion = false
+        group.fillMode = .forwards
+
+        CATransaction.begin()
+        CATransaction.setCompletionBlock { ring.removeFromSuperlayer() }
+        ring.add(group, forKey: "ripple")
+        CATransaction.commit()
+    }
+
     private func tick() {
-        guard isOn else { return }
+        guard isOn, mode == .pointer else { return }
 
         let p = NSEvent.mouseLocation
         let dx = p.x - lastPoint.x, dy = p.y - lastPoint.y
@@ -285,14 +514,71 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         CATransaction.begin()
         CATransaction.setDisableActions(true)   // no implicit tweening on position
-        emitter.emitterPosition = local
-        emitter.birthRate = speed < Config.minSpeed
-            ? 0
-            : Float(min(speed / Config.speedForFullRate, 1.6))
+
+        switch effect {
+        case .glitter:
+            emitter.emitterPosition = local
+            emitter.birthRate = speed < Config.minSpeed
+                ? 0
+                : Float(min(speed / Config.speedForFullRate, 1.6))
+
+        case .laser:
+            laserDot.path = CGPath(ellipseIn: CGRect(x: local.x - Config.laserDotRadius,
+                                                       y: local.y - Config.laserDotRadius,
+                                                       width: Config.laserDotRadius * 2,
+                                                       height: Config.laserDotRadius * 2),
+                                    transform: nil)
+
+        case .spotlight:
+            let full = CGPath(rect: CGRect(origin: .zero, size: window.frame.size), transform: nil)
+            let hole = CGMutablePath()
+            hole.addEllipse(in: CGRect(x: local.x - Config.spotlightRadius,
+                                        y: local.y - Config.spotlightRadius,
+                                        width: Config.spotlightRadius * 2,
+                                        height: Config.spotlightRadius * 2))
+            let combined = CGMutablePath()
+            combined.addPath(full)
+            combined.addPath(hole)
+            spotlightLayer.path = combined
+
+        case .ripple:
+            break   // ripples spawn on click (see handleGlobalClick), nothing to do per-frame
+        }
+
         CATransaction.commit()
     }
 
-    @objc private func toggleGlitter(_ sender: NSMenuItem) {
+    // MARK: AnnotationDrawing
+
+    func annotationBegin(at point: CGPoint) {
+        guard mode == .annotate else { return }
+        let path = CGMutablePath()
+        path.move(to: point)
+        let layer = CAShapeLayer()
+        layer.strokeColor = annotationColor.color.cgColor
+        layer.fillColor = nil
+        layer.lineWidth = Config.annotationWidth
+        layer.lineCap = .round
+        layer.lineJoin = .round
+        annotationLayer.addSublayer(layer)
+        currentStroke = (path, layer)
+    }
+
+    func annotationDrag(to point: CGPoint) {
+        guard let stroke = currentStroke else { return }
+        stroke.path.addLine(to: point)
+        stroke.layer.path = stroke.path
+    }
+
+    func annotationEnd() {
+        guard let stroke = currentStroke else { return }
+        strokeLayers.append(stroke.layer)
+        currentStroke = nil
+    }
+
+    // MARK: Menu actions
+
+    @objc private func toggleEffects(_ sender: NSMenuItem) {
         isOn.toggle()
         Prefs.isOn = isOn
         sender.state = isOn ? .on : .off
@@ -302,6 +588,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             emitter.birthRate = 0
             CATransaction.commit()
         }
+    }
+
+    @objc private func chooseEffect(_ sender: NSMenuItem) {
+        guard let raw = sender.representedObject as? String,
+              let picked = PointerEffect(rawValue: raw) else { return }
+        effect = picked
+        Prefs.effect = picked
+        sender.menu?.items.forEach { $0.state = ($0 === sender) ? .on : .off }
+
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        applyEffectVisibility()
+        CATransaction.commit()
     }
 
     @objc private func choosePalette(_ sender: NSMenuItem) {
@@ -317,12 +616,55 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         CATransaction.commit()
     }
 
+    /// Flips the overlay between click-through (.pointer) and
+    /// click-capturing (.annotate). While Annotate Mode is on, ALL clicks
+    /// go to drawing — none reach the app underneath — same tradeoff as
+    /// Zoom's or Loom's built-in annotate tools. Toggle it off to resume
+    /// normal interaction.
+    @objc private func toggleAnnotateMode(_ sender: NSMenuItem) {
+        mode = (mode == .pointer) ? .annotate : .pointer
+        window.ignoresMouseEvents = (mode == .pointer)
+        sender.state = (mode == .annotate) ? .on : .off
+
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        if mode == .annotate {
+            emitter.birthRate = 0
+            laserDot.isHidden = true
+            spotlightLayer.isHidden = true
+        } else {
+            applyEffectVisibility()
+        }
+        CATransaction.commit()
+    }
+
+    @objc private func chooseAnnotationColor(_ sender: NSMenuItem) {
+        guard let raw = sender.representedObject as? String,
+              let picked = AnnotationColor(rawValue: raw) else { return }
+        annotationColor = picked
+        Prefs.annotationColor = picked
+        sender.menu?.items.forEach { $0.state = ($0 === sender) ? .on : .off }
+    }
+
+    @objc private func undoStroke() {
+        guard let last = strokeLayers.popLast() else { return }
+        last.removeFromSuperlayer()
+    }
+
+    @objc private func clearAnnotations() {
+        strokeLayers.forEach { $0.removeFromSuperlayer() }
+        strokeLayers.removeAll()
+    }
+
     @objc private func screensChanged() {
         let frame = deskFrame
         window.setFrame(frame, display: false)
         CATransaction.begin()
         CATransaction.setDisableActions(true)
         emitter.frame = CGRect(origin: .zero, size: frame.size)
+        rippleContainer.frame = CGRect(origin: .zero, size: frame.size)
+        spotlightLayer.frame = CGRect(origin: .zero, size: frame.size)
+        annotationLayer.frame = CGRect(origin: .zero, size: frame.size)
         CATransaction.commit()
     }
 }
