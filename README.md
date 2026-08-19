@@ -9,13 +9,26 @@ training. It overlays your whole desktop with:
   around your cursor), or Laser Pointer (a simple glowing tracking dot).
 - **Annotate Mode** — draw freehand on top of whatever you're presenting,
   in a choice of colors, with undo and clear-all.
+- **Hotkeys** to switch effects without touching the mouse, so you never
+  have to break your presenting flow to reach the menu bar:
+
+  | Hotkey | Effect |
+  |---|---|
+  | ⌃⌥1 | Glitter |
+  | ⌃⌥2 | Click Ripple |
+  | ⌃⌥3 | Spotlight |
+  | ⌃⌥4 | Laser Pointer |
 
 Transparent, click-through overlay window; no special permissions
-required. Cursor position is polled via `NSEvent.mouseLocation` and clicks
-are observed with a global mouse monitor — neither needs Accessibility or
-Input Monitoring access. (A global keyboard hotkey for Annotate Mode was
-deliberately left out, since that specifically would require Input
-Monitoring permission — everything's reachable from the ✨ menu instead.)
+required. Cursor position is polled via `NSEvent.mouseLocation`, clicks
+are observed with a global mouse monitor, and the hotkeys above are
+registered with the classic Carbon Hot Key API — none of that needs
+Accessibility or Input Monitoring access. (NSEvent's global *keyboard*
+monitor would need Input Monitoring; Carbon's `RegisterEventHotKey`
+instead claims one specific key combo with the OS, so nothing is watching
+your keystrokes and no permission prompt appears. Annotate Mode itself
+still has no dedicated hotkey — reachable from the ✨ menu, or you can ask
+for one to be added the same way if you'd find it useful.)
 
 ## Build & run
 

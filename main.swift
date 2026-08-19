@@ -10,17 +10,24 @@
 //  toggle it off to resume normal interaction with the app underneath.
 //
 //  No special permissions needed: cursor position is polled with
-//  NSEvent.mouseLocation, and clicks are observed with a global mouse
-//  monitor — neither requires Accessibility or Input Monitoring access.
-//  (A global keyboard hotkey for Annotate Mode was deliberately left out:
-//  that would require Input Monitoring permission, which felt like too
-//  high a cost for a personal tool. Reachable from the menu bar instead.)
+//  NSEvent.mouseLocation, clicks are observed with a global mouse monitor,
+//  and effect-switching hotkeys are registered with the old Carbon Hot Key
+//  API (RegisterEventHotKey) — none of these require Accessibility or
+//  Input Monitoring access. (NSEvent's global *keyboard* monitor would
+//  require Input Monitoring, which is why the hotkeys go through Carbon
+//  instead: it registers one specific combo with the OS rather than
+//  watching every keystroke, so no prompt is needed.)
+//
+//  Hotkeys (work system-wide, while any app is focused):
+//    ⌃⌥1  Glitter        ⌃⌥2  Click Ripple
+//    ⌃⌥3  Spotlight      ⌃⌥4  Laser Pointer
 //
 //  Build:  ./build.sh     Run:  open Glitter.app     Quit: menu bar ✨ → Quit
 //
 
 import Cocoa
 import QuartzCore
+import Carbon.HIToolbox
 
 // MARK: - Tunables
 
@@ -287,8 +294,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, AnnotationDrawing {
     private let texture = sparkleTexture()
     private var statusItem: NSStatusItem!
     private var annotateMenuItem: NSMenuItem?
+    private var effectMenu: NSMenu?
     private var timer: Timer?
     private var clickMonitor: Any?
+    private var hotKeyRefs: [EventHotKeyRef?] = []
+    private var hotKeyActions: [UInt32: () -> Void] = [:]
 
     private var rippleContainer = CALayer()
     private var spotlightLayer = CAShapeLayer()
@@ -309,12 +319,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, AnnotationDrawing {
         buildMenuBar()
         start()
         installClickMonitor()
+        installHotKeys()
 
         NotificationCenter.default.addObserver(
             self,
             selector: #selector(screensChanged),
             name: NSApplication.didChangeScreenParametersNotification,
             object: nil)
+    }
+
+    func applicationWillTerminate(_ notification: Notification) {
+        for ref in hotKeyRefs {
+            if let ref = ref { UnregisterEventHotKey(ref) }
+        }
     }
 
     // Union of every attached display, so one window covers the whole desk —
@@ -423,14 +440,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, AnnotationDrawing {
 
         let effectItem = NSMenuItem(title: "Effect", action: nil, keyEquivalent: "")
         let effectMenu = NSMenu()
+        let effectHotkeys: [PointerEffect: String] = [.glitter: "1", .ripple: "2", .spotlight: "3", .laser: "4"]
         for e in PointerEffect.allCases {
-            let item = NSMenuItem(title: e.rawValue, action: #selector(chooseEffect(_:)), keyEquivalent: "")
+            let item = NSMenuItem(title: e.rawValue, action: #selector(chooseEffect(_:)), keyEquivalent: effectHotkeys[e] ?? "")
+            item.keyEquivalentModifierMask = [.control, .option]   // display only — the real binding is the Carbon hotkey below
             item.target = self
             item.representedObject = e.rawValue
             item.state = (e == effect) ? .on : .off
             effectMenu.addItem(item)
         }
         effectItem.submenu = effectMenu
+        self.effectMenu = effectMenu
         menu.addItem(effectItem)
 
         let paletteItem = NSMenuItem(title: "Glitter Palette", action: nil, keyEquivalent: "")
@@ -491,6 +511,44 @@ final class AppDelegate: NSObject, NSApplicationDelegate, AnnotationDrawing {
     private func installClickMonitor() {
         clickMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] event in
             self?.handleGlobalClick(rightButton: event.type == .rightMouseDown)
+        }
+    }
+
+    /// Registers ⌃⌥1-4 as system-wide effect-switching hotkeys via the
+    /// Carbon Hot Key API. This is deliberately not NSEvent's global
+    /// keyDown monitor: RegisterEventHotKey claims one specific combo with
+    /// the OS and only that combo is ever delivered to us (consumed before
+    /// any other app sees it), so — unlike watching every keystroke — it
+    /// needs no Input Monitoring permission.
+    private func installHotKeys() {
+        var eventType = EventTypeSpec(eventClass: OSType(kEventClassKeyboard),
+                                       eventKind: OSType(kEventHotKeyPressed))
+        InstallEventHandler(GetApplicationEventTarget(), { _, eventRef, userData in
+            guard let eventRef = eventRef, let userData = userData else { return noErr }
+            var hotKeyID = EventHotKeyID()
+            GetEventParameter(eventRef, EventParamName(kEventParamDirectObject), EventParamType(typeEventHotKeyID),
+                               nil, MemoryLayout<EventHotKeyID>.size, nil, &hotKeyID)
+            let delegate = Unmanaged<AppDelegate>.fromOpaque(userData).takeUnretainedValue()
+            let id = hotKeyID.id
+            DispatchQueue.main.async { delegate.hotKeyActions[id]?() }
+            return noErr
+        }, 1, &eventType, Unmanaged.passUnretained(self).toOpaque(), nil)
+
+        let signature: OSType = 0x474C5452   // 'GLTR'
+        let modifiers = UInt32(controlKey | optionKey)   // ⌃⌥
+        let bindings: [(id: UInt32, keyCode: UInt32, effect: PointerEffect)] = [
+            (1, UInt32(kVK_ANSI_1), .glitter),
+            (2, UInt32(kVK_ANSI_2), .ripple),
+            (3, UInt32(kVK_ANSI_3), .spotlight),
+            (4, UInt32(kVK_ANSI_4), .laser),
+        ]
+
+        for binding in bindings {
+            hotKeyActions[binding.id] = { [weak self] in self?.applyEffect(binding.effect) }
+            var ref: EventHotKeyRef?
+            let hotKeyID = EventHotKeyID(signature: signature, id: binding.id)
+            RegisterEventHotKey(binding.keyCode, modifiers, hotKeyID, GetApplicationEventTarget(), 0, &ref)
+            hotKeyRefs.append(ref)
         }
     }
 
@@ -626,10 +684,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, AnnotationDrawing {
     @objc private func chooseEffect(_ sender: NSMenuItem) {
         guard let raw = sender.representedObject as? String,
               let picked = PointerEffect(rawValue: raw) else { return }
+        applyEffect(picked)
+    }
+
+    /// Shared by the Effect submenu and the ⌃⌥1-4 hotkeys.
+    private func applyEffect(_ picked: PointerEffect) {
         effect = picked
         Prefs.effect = picked
-        sender.menu?.items.forEach { $0.state = ($0 === sender) ? .on : .off }
+        effectMenu?.items.forEach { $0.state = ($0.representedObject as? String == picked.rawValue) ? .on : .off }
 
+        // Annotate Mode owns layer visibility while it's active (see
+        // enterAnnotateMode/exitAnnotateMode) -- leave it alone here so a
+        // hotkey pressed mid-drawing doesn't pop a pointer effect on top
+        // of what you're annotating. exitAnnotateMode() re-applies
+        // whatever effect is current once you're back in .pointer mode.
+        guard mode == .pointer else { return }
         CATransaction.begin()
         CATransaction.setDisableActions(true)
         applyEffectVisibility()
