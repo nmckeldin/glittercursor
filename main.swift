@@ -675,6 +675,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, AnnotationDrawing {
                 : Float(min(speed / Config.speedForFullRate, 1.6))
 
         case .laser:
+            // Any other app's ordinary cursor handling -- switching
+            // between arrow/I-beam/hand as the mouse crosses different UI,
+            // which happens constantly and is completely normal -- can
+            // silently override our CGDisplayHideCursor call from a
+            // background app. Re-assert every frame so it can't stay
+            // visible for more than 1/60s. Show-then-hide (not hide alone)
+            // because CGDisplayHideCursor is a systemwide reference count,
+            // not a flag -- calling it alone every frame would run the
+            // count up far past what one matching show could undo later,
+            // risking a cursor stuck invisible even after quitting.
+            // Show-then-hide nets to zero change in the count, so it can't
+            // drift no matter how long this runs.
+            CGDisplayShowCursor(CGMainDisplayID())
+            CGDisplayHideCursor(CGMainDisplayID())
             laserDot.path = CGPath(ellipseIn: CGRect(x: local.x - Config.laserDotRadius,
                                                        y: local.y - Config.laserDotRadius,
                                                        width: Config.laserDotRadius * 2,
