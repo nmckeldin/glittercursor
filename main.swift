@@ -28,6 +28,7 @@
 import Cocoa
 import QuartzCore
 import Carbon.HIToolbox
+import CoreGraphics
 
 // MARK: - Tunables
 
@@ -321,6 +322,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, AnnotationDrawing {
     private var cursorHidden = false
 
     func applicationDidFinishLaunching(_ note: Notification) {
+        // Defensive recovery: CGDisplayHideCursor's hidden state belongs to
+        // the display, not to us, and survives our process exiting
+        // uncleanly (a crash, a force-quit) -- unlike NSCursor's hide,
+        // nothing automatically restores it. If a previous Glitter run
+        // left the cursor hidden, this clears that before we do anything
+        // else. Harmless no-op if the cursor was already visible.
+        CGDisplayShowCursor(CGMainDisplayID())
+
         buildWindow()
         buildMenuBar()
         start()
@@ -339,25 +348,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate, AnnotationDrawing {
         for ref in hotKeyRefs {
             if let ref = ref { UnregisterEventHotKey(ref) }
         }
-        if cursorHidden { NSCursor.unhide() }   // never leave the user's cursor hidden on quit
+        if cursorHidden { CGDisplayShowCursor(CGMainDisplayID()) }   // never leave the user's cursor hidden on quit
     }
 
     /// Laser Pointer draws its own dot, so the system arrow next to it is
     /// redundant -- hide it while that effect is active and on, and
     /// nowhere else (Annotate Mode needs the real cursor to draw with).
-    /// NSCursor.hide()/unhide() must stay balanced -- this tracks our own
-    /// state so repeated calls (e.g. from both a hotkey and the menu) never
-    /// double-hide or double-unhide. macOS itself may force the cursor back
-    /// on during some app-switching/Spaces transitions, as a safety net
-    /// against apps hiding it forever -- that's OS behavior, not a bug;
-    /// worst case it flickers back and re-hides on the next update here.
+    ///
+    /// Deliberately CGDisplayHideCursor, not NSCursor.hide(): NSCursor's
+    /// hide only takes effect while the *calling app* is active, and
+    /// restores automatically the instant it isn't -- which for an
+    /// accessory app that's essentially never the frontmost app (you're
+    /// always working in whatever you're presenting) means it never
+    /// visibly does anything. CGDisplayHideCursor operates on the display
+    /// itself, independent of which app is active, so it actually holds
+    /// while some other app has focus.
+    ///
+    /// The tradeoff: unlike NSCursor, nothing auto-restores this if we
+    /// exit uncleanly, so the calls must stay balanced -- this tracks our
+    /// own state to guarantee that (see also the recovery call in
+    /// applicationDidFinishLaunching and the cleanup in
+    /// applicationWillTerminate above).
     private func updateCursorVisibility() {
         let shouldHide = isOn && mode == .pointer && effect == .laser
         if shouldHide && !cursorHidden {
-            NSCursor.hide()
+            CGDisplayHideCursor(CGMainDisplayID())
             cursorHidden = true
         } else if !shouldHide && cursorHidden {
-            NSCursor.unhide()
+            CGDisplayShowCursor(CGMainDisplayID())
             cursorHidden = false
         }
     }
@@ -717,12 +735,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, AnnotationDrawing {
         Prefs.isOn = isOn
         sender.state = isOn ? .on : .off
         updateCursorVisibility()
-        if !isOn {
-            CATransaction.begin()
-            CATransaction.setDisableActions(true)
+
+        // Annotate Mode already forces every pointer-effect layer hidden
+        // independently of isOn -- don't fight that here.
+        guard mode == .pointer else { return }
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        if isOn {
+            applyEffectVisibility()   // restore whichever effect is currently selected
+        } else {
+            // Hide everything, not just the glitter emitter -- previously
+            // this left the laser dot or a spotlight cutout frozen on
+            // screen, visible even with Cursor Effects switched off.
             emitter.birthRate = 0
-            CATransaction.commit()
+            laserDot.isHidden = true
+            spotlightLayer.isHidden = true
         }
+        CATransaction.commit()
     }
 
     @objc private func chooseEffect(_ sender: NSMenuItem) {
