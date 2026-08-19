@@ -29,6 +29,7 @@ import Cocoa
 import QuartzCore
 import Carbon.HIToolbox
 import CoreGraphics
+import ApplicationServices
 
 // MARK: - Tunables
 
@@ -320,6 +321,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, AnnotationDrawing {
     private var isOn: Bool = Prefs.isOn
     private var mode: Mode = .pointer
     private var cursorHidden = false
+    private var accessibilityPromptShown = false
 
     func applicationDidFinishLaunching(_ note: Notification) {
         // Defensive recovery: CGDisplayHideCursor's hidden state belongs to
@@ -355,35 +357,50 @@ final class AppDelegate: NSObject, NSApplicationDelegate, AnnotationDrawing {
     /// redundant -- hide it while that effect is active and on, and
     /// nowhere else (Annotate Mode needs the real cursor to draw with).
     ///
-    /// Deliberately CGDisplayHideCursor, not NSCursor.hide(): NSCursor's
-    /// hide only takes effect while the *calling app* is active, and
-    /// restores automatically the instant it isn't -- which for an
-    /// accessory app that's essentially never the frontmost app (you're
-    /// always working in whatever you're presenting) means it never
-    /// visibly does anything. CGDisplayHideCursor operates on the display
-    /// itself, independent of which app is active, so it actually holds
-    /// while some other app has focus.
-    ///
-    /// The tradeoff: unlike NSCursor, nothing auto-restores this if we
-    /// exit uncleanly, so the calls must stay balanced -- this tracks our
-    /// own state to guarantee that (see also the recovery call in
-    /// applicationDidFinishLaunching and the cleanup in
-    /// applicationWillTerminate above).
+    /// Two prior attempts (NSCursor.hide(), then plain CGDisplayHideCursor)
+    /// both failed with zero visible effect, confirmed by reading back
+    /// CGDisplayHideCursor's own return value: it reports success even
+    /// though nothing visually changes. That points at the window server
+    /// only honoring a visual cursor-hide for whichever process currently
+    /// owns cursor rendering -- which an accessory app essentially never
+    /// is, permission or no. Accessibility trust is what's believed to
+    /// unlock that. Gated live (not cached) so granting it in System
+    /// Settings takes effect immediately, no relaunch needed.
     private func updateCursorVisibility() {
         let shouldHide = isOn && mode == .pointer && effect == .laser
-        if shouldHide && !cursorHidden {
-            // TEMPORARY DIAGNOSTIC: CGDisplayHideCursor returns a CGError
-            // we've been silently discarding. Two prior fixes both failed
-            // with zero visible effect, so surface the actual result
-            // instead of guessing again -- flashes e.g. "hide:0" (reported
-            // success) or a nonzero code (an actual failure reason).
-            let result = CGDisplayHideCursor(CGMainDisplayID())
-            flashStatusItem("hide:\(result.rawValue)")
-            cursorHidden = true
-        } else if !shouldHide && cursorHidden {
+        if shouldHide {
+            reassertCursorHidden()
+        } else if cursorHidden {
             CGDisplayShowCursor(CGMainDisplayID())
             cursorHidden = false
         }
+    }
+
+    /// Re-asserts the cursor as hidden; safe to call every frame (see
+    /// tick()'s .laser case). No-ops entirely without Accessibility trust,
+    /// so this never fights the system when permission hasn't been
+    /// granted. Once hidden, uses a net-zero show-then-hide pair rather
+    /// than hide alone -- CGDisplayHideCursor/ShowCursor share a
+    /// systemwide reference count across all processes, not a boolean, so
+    /// calling hide alone every frame would run that count up far past
+    /// what one matching show could ever undo, risking a cursor stuck
+    /// invisible even after quitting.
+    private func reassertCursorHidden() {
+        guard AXIsProcessTrusted() else { return }
+        if cursorHidden { CGDisplayShowCursor(CGMainDisplayID()) }
+        CGDisplayHideCursor(CGMainDisplayID())
+        cursorHidden = true
+    }
+
+    /// Requests Accessibility trust the first time Laser Pointer is
+    /// selected -- the one point where hiding the system cursor actually
+    /// matters. Only prompts once per launch; if declined or ignored, the
+    /// laser dot still works fine, just without hiding the OS arrow.
+    private func ensureAccessibilityAccess() {
+        guard !AXIsProcessTrusted(), !accessibilityPromptShown else { return }
+        accessibilityPromptShown = true
+        let promptKey = kAXTrustedCheckOptionPrompt.takeUnretainedValue() as NSString
+        AXIsProcessTrustedWithOptions([promptKey: true] as CFDictionary)
     }
 
     // Union of every attached display, so one window covers the whole desk —
@@ -681,20 +698,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, AnnotationDrawing {
                 : Float(min(speed / Config.speedForFullRate, 1.6))
 
         case .laser:
-            // Any other app's ordinary cursor handling -- switching
-            // between arrow/I-beam/hand as the mouse crosses different UI,
-            // which happens constantly and is completely normal -- can
-            // silently override our CGDisplayHideCursor call from a
-            // background app. Re-assert every frame so it can't stay
-            // visible for more than 1/60s. Show-then-hide (not hide alone)
-            // because CGDisplayHideCursor is a systemwide reference count,
-            // not a flag -- calling it alone every frame would run the
-            // count up far past what one matching show could undo later,
-            // risking a cursor stuck invisible even after quitting.
-            // Show-then-hide nets to zero change in the count, so it can't
-            // drift no matter how long this runs.
-            CGDisplayShowCursor(CGMainDisplayID())
-            CGDisplayHideCursor(CGMainDisplayID())
+            // Re-assert every frame, not just on effect switch: any other
+            // app's ordinary cursor handling (switching between arrow/
+            // I-beam/hand as the mouse crosses different UI) can undo a
+            // background app's hide within the same frame. No-ops without
+            // Accessibility trust -- see reassertCursorHidden().
+            reassertCursorHidden()
             laserDot.path = CGPath(ellipseIn: CGRect(x: local.x - Config.laserDotRadius,
                                                        y: local.y - Config.laserDotRadius,
                                                        width: Config.laserDotRadius * 2,
@@ -786,6 +795,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, AnnotationDrawing {
         Prefs.effect = picked
         effectMenu?.items.forEach { $0.state = ($0.representedObject as? String == picked.rawValue) ? .on : .off }
         flashStatusItem(picked.rawValue)
+        if picked == .laser { ensureAccessibilityAccess() }
         updateCursorVisibility()
 
         // Annotate Mode owns layer visibility while it's active (see
