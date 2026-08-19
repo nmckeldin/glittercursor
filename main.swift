@@ -427,6 +427,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, AnnotationDrawing {
         }
     }
 
+    /// Briefly shows text in the menu bar instead of ✨ — an unmissable,
+    /// immediate confirmation that a hotkey (or menu click) actually
+    /// registered, without needing to open the menu or check Console.app.
+    private func flashStatusItem(_ text: String) {
+        statusItem.button?.title = text
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.9) { [weak self] in
+            self?.statusItem.button?.title = "✨"
+        }
+    }
+
     /// Shows/hides each effect's layer to match the current selection.
     /// Does not touch Annotate mode's layers.
     private func applyEffectVisibility() {
@@ -702,6 +712,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, AnnotationDrawing {
         effect = picked
         Prefs.effect = picked
         effectMenu?.items.forEach { $0.state = ($0.representedObject as? String == picked.rawValue) ? .on : .off }
+        flashStatusItem(picked.rawValue)
 
         // Annotate Mode owns layer visibility while it's active (see
         // enterAnnotateMode/exitAnnotateMode) -- leave it alone here so a
