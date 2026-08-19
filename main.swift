@@ -232,6 +232,13 @@ final class OverlayContentView: NSView {
 }
 
 final class OverlayWindow: NSWindow {
+    /// Called when Escape is pressed while this window is key. A guaranteed
+    /// way out of Annotate Mode: it works purely through window key status,
+    /// not hit-testing geometry, so it can't be blocked by the overlay
+    /// covering something it shouldn't (see deskFrame's menu-bar exclusion
+    /// for the other half of that fix).
+    var onEscape: (() -> Void)?
+
     init(frame: NSRect) {
         super.init(contentRect: frame, styleMask: .borderless, backing: .buffered, defer: false)
         isOpaque = false
@@ -254,8 +261,21 @@ final class OverlayWindow: NSWindow {
         contentView = view
     }
 
-    override var canBecomeKey: Bool { false }
+    // Needs to become key so it can receive Escape via keyDown below —
+    // this costs no permission (a window becoming key in its own app is
+    // completely normal) and is harmless in .pointer mode, since
+    // ignoresMouseEvents there means no click ever reaches this window to
+    // make it key in the first place.
+    override var canBecomeKey: Bool { true }
     override var canBecomeMain: Bool { false }
+
+    override func keyDown(with event: NSEvent) {
+        if event.keyCode == 53 {   // Escape
+            onEscape?()
+        } else {
+            super.keyDown(with: event)
+        }
+    }
 }
 
 // MARK: - App
@@ -266,6 +286,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, AnnotationDrawing {
     private var emitter = CAEmitterLayer()
     private let texture = sparkleTexture()
     private var statusItem: NSStatusItem!
+    private var annotateMenuItem: NSMenuItem?
     private var timer: Timer?
     private var clickMonitor: Any?
 
@@ -296,10 +317,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, AnnotationDrawing {
             object: nil)
     }
 
-    // Union of every attached display, so one window covers the whole desk.
+    // Union of every attached display, so one window covers the whole desk —
+    // minus a strip across the top equal to the menu bar's height, so the
+    // overlay can never claim clicks meant for the menu bar or any status
+    // item (including our own ✨ icon). Without this, Annotate Mode's
+    // click-capturing can make the menu bar itself unclickable, with no way
+    // back in. (Belt-and-suspenders: Escape also force-exits Annotate Mode
+    // regardless of this geometry — see OverlayWindow.onEscape.)
     private var deskFrame: NSRect {
         guard let first = NSScreen.screens.first else { return .zero }
-        return NSScreen.screens.dropFirst().reduce(first.frame) { $0.union($1.frame) }
+        let union = NSScreen.screens.dropFirst().reduce(first.frame) { $0.union($1.frame) }
+        let menuBarHeight = first.frame.maxY - first.visibleFrame.maxY
+        return NSRect(x: union.minX, y: union.minY,
+                      width: union.width, height: union.height - menuBarHeight)
     }
 
     private func buildWindow() {
@@ -339,6 +369,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, AnnotationDrawing {
 
         window.setFrame(frame, display: false)
         window.orderFrontRegardless()
+        window.onEscape = { [weak self] in self?.exitAnnotateMode() }
         applyEffectVisibility()
     }
 
@@ -419,6 +450,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, AnnotationDrawing {
         annotate.target = self
         annotate.state = .off
         menu.addItem(annotate)
+        annotateMenuItem = annotate
 
         let colorItem = NSMenuItem(title: "Annotation Color", action: nil, keyEquivalent: "")
         let colorMenu = NSMenu()
@@ -620,22 +652,38 @@ final class AppDelegate: NSObject, NSApplicationDelegate, AnnotationDrawing {
     /// Flips the overlay between click-through (.pointer) and
     /// click-capturing (.annotate). While Annotate Mode is on, ALL clicks
     /// go to drawing — none reach the app underneath — same tradeoff as
-    /// Zoom's or Loom's built-in annotate tools. Toggle it off to resume
-    /// normal interaction.
+    /// Zoom's or Loom's built-in annotate tools. Toggle it off (from the
+    /// menu, or press Escape) to resume normal interaction.
     @objc private func toggleAnnotateMode(_ sender: NSMenuItem) {
-        mode = (mode == .pointer) ? .annotate : .pointer
-        window.ignoresMouseEvents = (mode == .pointer)
-        sender.state = (mode == .annotate) ? .on : .off
+        if mode == .pointer { enterAnnotateMode() } else { exitAnnotateMode() }
+    }
+
+    private func enterAnnotateMode() {
+        mode = .annotate
+        window.ignoresMouseEvents = false
+        window.makeKey()   // lets Escape reach keyDown below, no permission needed
+        annotateMenuItem?.state = .on
 
         CATransaction.begin()
         CATransaction.setDisableActions(true)
-        if mode == .annotate {
-            emitter.birthRate = 0
-            laserDot.isHidden = true
-            spotlightLayer.isHidden = true
-        } else {
-            applyEffectVisibility()
-        }
+        emitter.birthRate = 0
+        laserDot.isHidden = true
+        spotlightLayer.isHidden = true
+        CATransaction.commit()
+    }
+
+    /// The one guaranteed way back to normal interaction: reachable from
+    /// the menu, and from Escape (OverlayWindow.onEscape) regardless of
+    /// whatever the overlay's frame happens to cover.
+    private func exitAnnotateMode() {
+        guard mode == .annotate else { return }
+        mode = .pointer
+        window.ignoresMouseEvents = true
+        annotateMenuItem?.state = .off
+
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        applyEffectVisibility()
         CATransaction.commit()
     }
 

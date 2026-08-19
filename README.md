@@ -42,7 +42,9 @@ Quit from the menu bar: ✨ → Quit Glitter.
 2. When you need to draw on the screen, click ✨ → **Annotate Mode**.
    While it's on, *all* clicks go to drawing — nothing reaches the app
    you're presenting — same tradeoff Zoom/Loom's own annotate tools make.
-   Toggle it off to go back to normal.
+   Toggle it off from the menu to go back to normal, or just press
+   **Escape** — that always works, even if the menu bar itself is
+   momentarily hard to reach.
 3. Pick a color under ✨ → **Annotation Color**. **Undo Last Stroke** and
    **Clear Annotations** are in the same menu.
 
