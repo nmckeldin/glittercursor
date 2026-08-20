@@ -3,34 +3,35 @@
 Glitter — a macOS menu bar utility for screen-shared demos and live
 training. It overlays your whole desktop with:
 
-- **Cursor pointer effects** — Glitter (sparkle trail), Click Ripple
-  (expanding ring on every click, great for showing remote viewers exactly
-  where/when you clicked), Spotlight (dims everything except a circle
-  around your cursor), or Laser Pointer (a bright glowing dot with a
-  white outline, sized to read clearly on its own — see the permissions
-  note below for why it doesn't also hide the system arrow next to it).
+- **Cursor pointer effects** — Normal (plain system cursor, no effect at
+  all), Glitter (sparkle trail), Click Ripple (expanding ring on every
+  click, great for showing remote viewers exactly where/when you
+  clicked), Spotlight (dims everything except a circle around your
+  cursor), or Laser Pointer (a glowing tracking dot — see the
+  permissions note below for why it doesn't also hide the system arrow
+  next to it).
 - **Annotate Mode** — draw freehand on top of whatever you're presenting,
   in a choice of colors, with undo and clear-all.
-- **Hotkeys** to switch effects without touching the mouse, so you never
-  have to break your presenting flow to reach the menu bar:
+- **Hotkeys** for everything above, so you never have to break your
+  presenting flow to reach the menu bar:
 
-  | Hotkey | Effect |
+  | Hotkey | Action |
   |---|---|
   | ⌃⌥1 | Glitter |
   | ⌃⌥2 | Click Ripple |
   | ⌃⌥3 | Spotlight |
   | ⌃⌥4 | Laser Pointer |
+  | ⌃⌥5 | Normal (no effect) |
+  | ⌃⌥A | Toggle Annotate Mode |
+  | ⌃⌥C | Clear Annotations |
 
 Transparent, click-through overlay window. Cursor position is polled via
 `NSEvent.mouseLocation`, clicks are observed with a global mouse monitor,
-and the hotkeys above are registered with the classic Carbon Hot Key API
+and every hotkey above is registered with the classic Carbon Hot Key API
 — none of that needs Accessibility or Input Monitoring access. (NSEvent's
 global *keyboard* monitor would need Input Monitoring; Carbon's
 `RegisterEventHotKey` instead claims one specific key combo with the OS,
-so nothing is watching your keystrokes and no permission prompt appears.
-Annotate Mode itself still has no dedicated hotkey — reachable from the
-✨ menu, or you can ask for one to be added the same way if you'd find it
-useful.)
+so nothing is watching your keystrokes and no permission prompt appears.)
 
 **One exception: Laser Pointer requests Accessibility access,** in an
 attempt to also hide the system arrow next to the dot. It doesn't
@@ -44,11 +45,10 @@ interaction with whatever you're actually presenting — which means it's
 never the focused app, and so it can't claim cursor ownership either,
 no matter what permission it's granted. The Accessibility prompt (and
 the code behind it) stays in the app as a harmless best-effort attempt
-in case some future macOS version changes this, but the honest fallback
-is the dot's own visual weight: bright, glowing, white-outlined, sized
-to read clearly on its own even with the plain arrow sitting next to it.
-If you decline the Accessibility prompt, nothing else in the app is
-affected.
+in case some future macOS version changes this — if you decline it,
+Laser Pointer still works exactly the same, just without hiding the
+system arrow next to the dot. If the arrow bothers you, **Normal**
+(⌃⌥5) gives you the plain system cursor back with no overlay at all.
 
 ## Build & run
 

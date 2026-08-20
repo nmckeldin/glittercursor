@@ -11,16 +11,22 @@
 //
 //  No special permissions needed: cursor position is polled with
 //  NSEvent.mouseLocation, clicks are observed with a global mouse monitor,
-//  and effect-switching hotkeys are registered with the old Carbon Hot Key
-//  API (RegisterEventHotKey) — none of these require Accessibility or
-//  Input Monitoring access. (NSEvent's global *keyboard* monitor would
-//  require Input Monitoring, which is why the hotkeys go through Carbon
-//  instead: it registers one specific combo with the OS rather than
-//  watching every keystroke, so no prompt is needed.)
+//  and every hotkey below is registered with the old Carbon Hot Key API
+//  (RegisterEventHotKey) — none of these require Accessibility or Input
+//  Monitoring access. (NSEvent's global *keyboard* monitor would require
+//  Input Monitoring, which is why the hotkeys go through Carbon instead:
+//  it registers one specific combo with the OS rather than watching every
+//  keystroke, so no prompt is needed. Laser Pointer separately requests
+//  Accessibility in an attempt to also hide the system cursor — see
+//  updateCursorVisibility's doc comment for why that's a best-effort
+//  attempt rather than something Glitter can guarantee.)
 //
 //  Hotkeys (work system-wide, while any app is focused):
-//    ⌃⌥1  Glitter        ⌃⌥2  Click Ripple
-//    ⌃⌥3  Spotlight      ⌃⌥4  Laser Pointer
+//    ⌃⌥1  Glitter          ⌃⌥2  Click Ripple
+//    ⌃⌥3  Spotlight        ⌃⌥4  Laser Pointer
+//    ⌃⌥5  Normal (no effect)
+//    ⌃⌥A  Toggle Annotate Mode
+//    ⌃⌥C  Clear Annotations
 //
 //  Build:  ./build.sh     Run:  open Glitter.app     Quit: menu bar ✨ → Quit
 //
@@ -67,7 +73,7 @@ enum Config {
     // Click ripple / laser pointer
     static var rippleMaxRadius: CGFloat = d.tunable("rippleMaxRadius", 46)
     static var rippleDuration: Float = d.tunable("rippleDuration", 0.5)
-    static var laserDotRadius: CGFloat = d.tunable("laserDotRadius", 10)
+    static var laserDotRadius: CGFloat = d.tunable("laserDotRadius", 7)
 
     // Annotations
     static var annotationWidth: CGFloat = d.tunable("annotationWidth", 4)
@@ -109,6 +115,7 @@ enum Palette: String, CaseIterable {
 
 /// What the cursor draws as you move it. Only one is active at a time.
 enum PointerEffect: String, CaseIterable {
+    case none = "Normal"
     case glitter = "Glitter"
     case ripple = "Click Ripple"
     case spotlight = "Spotlight"
@@ -515,17 +522,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, AnnotationDrawing {
         rippleContainer.frame = CGRect(origin: .zero, size: frame.size)
         rootLayer.addSublayer(rippleContainer)
 
-        // Since the system arrow next to it can't be hidden from a
-        // click-through background app (see updateCursorVisibility's
-        // doc comment), make the dot itself dominant enough that the
-        // small arrow stops mattering: a bright glow plus a thin white
-        // outline so it reads clearly against both light and dark content.
         laserDot.fillColor = pointerColor.cgColor
-        laserDot.strokeColor = NSColor.white.cgColor
-        laserDot.lineWidth = 1.5
         laserDot.shadowColor = pointerColor.cgColor
-        laserDot.shadowRadius = 14
-        laserDot.shadowOpacity = 0.95
+        laserDot.shadowRadius = 8
+        laserDot.shadowOpacity = 0.9
         laserDot.shadowOffset = .zero
         laserDot.isHidden = true
         rootLayer.addSublayer(laserDot)
@@ -606,7 +606,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, AnnotationDrawing {
 
         let effectItem = NSMenuItem(title: "Effect", action: nil, keyEquivalent: "")
         let effectMenu = NSMenu()
-        let effectHotkeys: [PointerEffect: String] = [.glitter: "1", .ripple: "2", .spotlight: "3", .laser: "4"]
+        let effectHotkeys: [PointerEffect: String] = [.glitter: "1", .ripple: "2", .spotlight: "3", .laser: "4", .none: "5"]
         for e in PointerEffect.allCases {
             let item = NSMenuItem(title: e.rawValue, action: #selector(chooseEffect(_:)), keyEquivalent: effectHotkeys[e] ?? "")
             item.keyEquivalentModifierMask = [.control, .option]   // display only — the real binding is the Carbon hotkey below
@@ -632,7 +632,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, AnnotationDrawing {
         menu.addItem(paletteItem)
         menu.addItem(.separator())
 
-        let annotate = NSMenuItem(title: "Annotate Mode", action: #selector(toggleAnnotateMode(_:)), keyEquivalent: "")
+        let annotate = NSMenuItem(title: "Annotate Mode", action: #selector(toggleAnnotateMode(_:)), keyEquivalent: "a")
+        annotate.keyEquivalentModifierMask = [.control, .option]   // display only — real binding is the Carbon hotkey
         annotate.target = self
         annotate.state = .off
         menu.addItem(annotate)
@@ -654,7 +655,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, AnnotationDrawing {
         undo.target = self
         menu.addItem(undo)
 
-        let clear = NSMenuItem(title: "Clear Annotations", action: #selector(clearAnnotations), keyEquivalent: "")
+        let clear = NSMenuItem(title: "Clear Annotations", action: #selector(clearAnnotations), keyEquivalent: "c")
+        clear.keyEquivalentModifierMask = [.control, .option]   // display only — real binding is the Carbon hotkey
         clear.target = self
         menu.addItem(clear)
         menu.addItem(.separator())
@@ -702,15 +704,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, AnnotationDrawing {
 
         let signature: OSType = 0x474C5452   // 'GLTR'
         let modifiers = UInt32(controlKey | optionKey)   // ⌃⌥
-        let bindings: [(id: UInt32, keyCode: UInt32, effect: PointerEffect)] = [
-            (1, UInt32(kVK_ANSI_1), .glitter),
-            (2, UInt32(kVK_ANSI_2), .ripple),
-            (3, UInt32(kVK_ANSI_3), .spotlight),
-            (4, UInt32(kVK_ANSI_4), .laser),
+        let bindings: [(id: UInt32, keyCode: UInt32, action: () -> Void)] = [
+            (1, UInt32(kVK_ANSI_1), { [weak self] in self?.applyEffect(.glitter) }),
+            (2, UInt32(kVK_ANSI_2), { [weak self] in self?.applyEffect(.ripple) }),
+            (3, UInt32(kVK_ANSI_3), { [weak self] in self?.applyEffect(.spotlight) }),
+            (4, UInt32(kVK_ANSI_4), { [weak self] in self?.applyEffect(.laser) }),
+            (5, UInt32(kVK_ANSI_5), { [weak self] in self?.applyEffect(.none) }),
+            (6, UInt32(kVK_ANSI_A), { [weak self] in self?.toggleAnnotateModeState() }),
+            (7, UInt32(kVK_ANSI_C), { [weak self] in self?.clearAnnotations() }),
         ]
 
         for binding in bindings {
-            hotKeyActions[binding.id] = { [weak self] in self?.applyEffect(binding.effect) }
+            hotKeyActions[binding.id] = binding.action
             var ref: EventHotKeyRef?
             let hotKeyID = EventHotKeyID(signature: signature, id: binding.id)
             RegisterEventHotKey(binding.keyCode, modifiers, hotKeyID, GetApplicationEventTarget(), 0, &ref)
@@ -806,6 +811,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, AnnotationDrawing {
 
         case .ripple:
             break   // ripples spawn on click (see handleGlobalClick), nothing to do per-frame
+
+        case .none:
+            break   // plain system cursor, no per-frame drawing at all
         }
 
         CATransaction.commit()
@@ -914,6 +922,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, AnnotationDrawing {
     /// Zoom's or Loom's built-in annotate tools. Toggle it off (from the
     /// menu, or press Escape) to resume normal interaction.
     @objc private func toggleAnnotateMode(_ sender: NSMenuItem) {
+        toggleAnnotateModeState()
+    }
+
+    /// Shared by the menu item and the ⌃⌥A hotkey.
+    private func toggleAnnotateModeState() {
         if mode == .pointer { enterAnnotateMode() } else { exitAnnotateMode() }
     }
 
@@ -923,6 +936,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, AnnotationDrawing {
         window.makeKey()   // lets Escape reach keyDown below, no permission needed
         annotateMenuItem?.state = .on
         updateCursorVisibility()   // always show the real cursor while drawing
+        flashStatusItem("Annotate On")
 
         CATransaction.begin()
         CATransaction.setDisableActions(true)
@@ -941,6 +955,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, AnnotationDrawing {
         window.ignoresMouseEvents = true
         annotateMenuItem?.state = .off
         updateCursorVisibility()
+        flashStatusItem("Annotate Off")
 
         CATransaction.begin()
         CATransaction.setDisableActions(true)
@@ -964,6 +979,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, AnnotationDrawing {
     @objc private func clearAnnotations() {
         strokeLayers.forEach { $0.removeFromSuperlayer() }
         strokeLayers.removeAll()
+        flashStatusItem("Cleared")
     }
 
     @objc private func screensChanged() {
