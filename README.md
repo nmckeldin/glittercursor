@@ -7,9 +7,7 @@ training. It overlays your whole desktop with:
   all), Glitter (sparkle trail), Click Ripple (expanding ring on every
   click, great for showing remote viewers exactly where/when you
   clicked), Spotlight (dims everything except a circle around your
-  cursor), or Laser Pointer (a glowing tracking dot — see the
-  permissions note below for why it doesn't also hide the system arrow
-  next to it).
+  cursor), or Laser Pointer (a glowing tracking dot).
 - **Annotate Mode** — draw freehand on top of whatever you're presenting,
   in a choice of colors, with undo and clear-all.
 - **Hotkeys** for everything above, so you never have to break your
@@ -25,30 +23,22 @@ training. It overlays your whole desktop with:
   | ⌃⌥A | Toggle Annotate Mode |
   | ⌃⌥C | Clear Annotations |
 
-Transparent, click-through overlay window. Cursor position is polled via
-`NSEvent.mouseLocation`, clicks are observed with a global mouse monitor,
-and every hotkey above is registered with the classic Carbon Hot Key API
-— none of that needs Accessibility or Input Monitoring access. (NSEvent's
-global *keyboard* monitor would need Input Monitoring; Carbon's
-`RegisterEventHotKey` instead claims one specific key combo with the OS,
-so nothing is watching your keystrokes and no permission prompt appears.)
+Transparent, click-through overlay window; no special permissions
+required. Cursor position is polled via `NSEvent.mouseLocation`, clicks
+are observed with a global mouse monitor, and every hotkey above is
+registered with the classic Carbon Hot Key API — none of that needs
+Accessibility or Input Monitoring access. (NSEvent's global *keyboard*
+monitor would need Input Monitoring; Carbon's `RegisterEventHotKey`
+instead claims one specific key combo with the OS, so nothing is
+watching your keystrokes and no permission prompt appears.)
 
-**One exception: Laser Pointer requests Accessibility access,** in an
-attempt to also hide the system arrow next to the dot. It doesn't
-actually manage to — and after digging into why, that turns out to be
-structural, not a bug to keep chasing: cursor rendering at a given pixel
-belongs to whichever app's window is actually focused and under the
-cursor. Full-screen apps like QuickTime or Keynote can hide the cursor
-during playback because *they* are that app at that moment. Glitter's
-overlay is deliberately click-through, precisely so it never steals your
-interaction with whatever you're actually presenting — which means it's
-never the focused app, and so it can't claim cursor ownership either,
-no matter what permission it's granted. The Accessibility prompt (and
-the code behind it) stays in the app as a harmless best-effort attempt
-in case some future macOS version changes this — if you decline it,
-Laser Pointer still works exactly the same, just without hiding the
-system arrow next to the dot. If the arrow bothers you, **Normal**
-(⌃⌥5) gives you the plain system cursor back with no overlay at all.
+Laser Pointer's dot sits next to the plain system arrow rather than
+replacing it — hiding the system cursor from a click-through background
+app turns out to be structurally off the table (cursor rendering
+ownership belongs to whichever app is actually focused under the
+cursor, which Glitter deliberately never is). If that's distracting,
+**Normal** (⌃⌥5) gives you the plain system cursor back with no overlay
+at all.
 
 ## Build & run
 

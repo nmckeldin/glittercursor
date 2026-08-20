@@ -16,10 +16,7 @@
 //  Monitoring access. (NSEvent's global *keyboard* monitor would require
 //  Input Monitoring, which is why the hotkeys go through Carbon instead:
 //  it registers one specific combo with the OS rather than watching every
-//  keystroke, so no prompt is needed. Laser Pointer separately requests
-//  Accessibility in an attempt to also hide the system cursor — see
-//  updateCursorVisibility's doc comment for why that's a best-effort
-//  attempt rather than something Glitter can guarantee.)
+//  keystroke, so no prompt is needed.)
 //
 //  Hotkeys (work system-wide, while any app is focused):
 //    ⌃⌥1  Glitter          ⌃⌥2  Click Ripple
@@ -34,8 +31,6 @@
 import Cocoa
 import QuartzCore
 import Carbon.HIToolbox
-import CoreGraphics
-import ApplicationServices
 
 // MARK: - Tunables
 
@@ -313,8 +308,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, AnnotationDrawing {
     private var clickMonitor: Any?
     private var hotKeyRefs: [EventHotKeyRef?] = []
     private var hotKeyActions: [UInt32: () -> Void] = [:]
-    private var eventTap: CFMachPort?
-    private var eventTapRunLoopSource: CFRunLoopSource?
 
     private var rippleContainer = CALayer()
     private var spotlightLayer = CAShapeLayer()
@@ -329,24 +322,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, AnnotationDrawing {
     private var annotationColor: AnnotationColor = Prefs.annotationColor
     private var isOn: Bool = Prefs.isOn
     private var mode: Mode = .pointer
-    private var cursorHidden = false
-    private var accessibilityPromptShown = false
 
     func applicationDidFinishLaunching(_ note: Notification) {
-        // Defensive recovery: CGDisplayHideCursor's hidden state belongs to
-        // the display, not to us, and survives our process exiting
-        // uncleanly (a crash, a force-quit) -- unlike NSCursor's hide,
-        // nothing automatically restores it. If a previous Glitter run
-        // left the cursor hidden, this clears that before we do anything
-        // else. Harmless no-op if the cursor was already visible.
-        CGDisplayShowCursor(CGMainDisplayID())
-
         buildWindow()
         buildMenuBar()
         start()
         installClickMonitor()
         installHotKeys()
-        updateCursorVisibility()   // in case Laser Pointer was the persisted effect
 
         NotificationCenter.default.addObserver(
             self,
@@ -359,130 +341,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, AnnotationDrawing {
         for ref in hotKeyRefs {
             if let ref = ref { UnregisterEventHotKey(ref) }
         }
-        if let tap = eventTap { CGEvent.tapEnable(tap: tap, enable: false) }
-        if cursorHidden { CGDisplayShowCursor(CGMainDisplayID()) }   // never leave the user's cursor hidden on quit
-    }
-
-    /// Laser Pointer draws its own dot, so the system arrow next to it is
-    /// redundant -- hide it while that effect is active and on, and
-    /// nowhere else (Annotate Mode needs the real cursor to draw with).
-    ///
-    /// Two prior attempts (NSCursor.hide(), then plain CGDisplayHideCursor)
-    /// both failed with zero visible effect, confirmed by reading back
-    /// CGDisplayHideCursor's own return value: it reports success even
-    /// though nothing visually changes. That points at the window server
-    /// only honoring a visual cursor-hide for whichever process currently
-    /// owns cursor rendering -- which an accessory app essentially never
-    /// is, permission or no. Accessibility trust is what's believed to
-    /// unlock that. Gated live (not cached) so granting it in System
-    /// Settings takes effect immediately, no relaunch needed.
-    private func updateCursorVisibility() {
-        let shouldHide = isOn && mode == .pointer && effect == .laser
-        if shouldHide {
-            reassertCursorHidden()
-        } else if cursorHidden {
-            CGDisplayShowCursor(CGMainDisplayID())
-            cursorHidden = false
-        }
-    }
-
-    /// Re-asserts the cursor as hidden; safe to call every frame (see
-    /// tick()'s .laser case). No-ops entirely without Accessibility trust,
-    /// so this never fights the system when permission hasn't been
-    /// granted. Once hidden, uses a net-zero show-then-hide pair rather
-    /// than hide alone -- CGDisplayHideCursor/ShowCursor share a
-    /// systemwide reference count across all processes, not a boolean, so
-    /// calling hide alone every frame would run that count up far past
-    /// what one matching show could ever undo, risking a cursor stuck
-    /// invisible even after quitting.
-    private func reassertCursorHidden() {
-        guard AXIsProcessTrusted() else { return }
-        if cursorHidden { CGDisplayShowCursor(CGMainDisplayID()) }
-        CGDisplayHideCursor(CGMainDisplayID())
-        cursorHidden = true
-    }
-
-    /// Requests Accessibility trust the first time Laser Pointer is
-    /// selected -- the one point where hiding the system cursor actually
-    /// matters. Only prompts once per launch; if declined or ignored, the
-    /// laser dot still works fine, just without hiding the OS arrow.
-    private func ensureAccessibilityAccess() {
-        guard !AXIsProcessTrusted(), !accessibilityPromptShown else { return }
-        accessibilityPromptShown = true
-        let promptKey = kAXTrustedCheckOptionPrompt.takeUnretainedValue() as NSString
-        AXIsProcessTrustedWithOptions([promptKey: true] as CFDictionary)
-    }
-
-    /// Last resort for hiding the cursor: the timer-based reassertion in
-    /// tick() alone wasn't enough even with Accessibility trust, so this
-    /// listens for real mouse-moved events at the lowest level (HID, before
-    /// any window-server routing) and reasserts synchronously, on the spot,
-    /// rather than deferring to the next run-loop turn -- the theory being
-    /// that a background app's CGDisplayHideCursor call may only visually
-    /// stick while actively inside the OS's own processing of a mouse
-    /// event, not when called from an arbitrary timer.
-    ///
-    /// Safety: created with .listenOnly, which makes this tap structurally
-    /// incapable of blocking or dropping events -- Apple's API guarantees
-    /// that, it isn't just careful coding here. Worst case if this is
-    /// wrong: the cursor still doesn't hide, exactly like the last three
-    /// attempts. It can't hang mouse input to other apps.
-    ///
-    /// Idempotent and safe to call repeatedly (e.g. every time Laser
-    /// Pointer is picked) -- installs once and no-ops after.
-    private func installCursorEventTap() {
-        guard eventTap == nil, AXIsProcessTrusted() else { return }
-
-        let eventMask: CGEventMask =
-            (1 << CGEventType.mouseMoved.rawValue) |
-            (1 << CGEventType.leftMouseDragged.rawValue) |
-            (1 << CGEventType.rightMouseDragged.rawValue) |
-            (1 << CGEventType.otherMouseDragged.rawValue)
-
-        guard let tap = CGEvent.tapCreate(
-            tap: .cghidEventTap,
-            place: .headInsertEventTap,
-            options: .listenOnly,
-            eventsOfInterest: eventMask,
-            callback: { _, type, event, userInfo in
-                // Non-capturing C callback -- all context comes through
-                // userInfo. Never returns nil / never modifies event:
-                // always passes it straight through unchanged.
-                if let userInfo = userInfo {
-                    let delegate = Unmanaged<AppDelegate>.fromOpaque(userInfo).takeUnretainedValue()
-                    switch type {
-                    case .tapDisabledByTimeout, .tapDisabledByUserInput:
-                        delegate.reenableCursorEventTap()
-                    default:
-                        delegate.handleTapMouseMoved()
-                    }
-                }
-                return Unmanaged.passRetained(event)
-            },
-            userInfo: Unmanaged.passUnretained(self).toOpaque()
-        ) else { return }
-
-        guard let source = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0) else { return }
-        eventTap = tap
-        eventTapRunLoopSource = source
-        CFRunLoopAddSource(CFRunLoopGetMain(), source, .commonModes)
-        CGEvent.tapEnable(tap: tap, enable: true)
-    }
-
-    /// macOS auto-disables a tap that it judges too slow to keep up with
-    /// the event stream. Re-enable immediately if that happens -- cheap
-    /// insurance since our callback does almost nothing.
-    private func reenableCursorEventTap() {
-        guard let tap = eventTap else { return }
-        CGEvent.tapEnable(tap: tap, enable: true)
-    }
-
-    /// Fires on every real mouse-moved/dragged event, regardless of which
-    /// effect is currently selected -- gate here rather than by tearing
-    /// the tap down and rebuilding it each time the effect changes.
-    private func handleTapMouseMoved() {
-        guard isOn, mode == .pointer, effect == .laser else { return }
-        reassertCursorHidden()
     }
 
     // Union of every attached display, so one window covers the whole desk —
@@ -785,12 +643,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, AnnotationDrawing {
                 : Float(min(speed / Config.speedForFullRate, 1.6))
 
         case .laser:
-            // Re-assert every frame, not just on effect switch: any other
-            // app's ordinary cursor handling (switching between arrow/
-            // I-beam/hand as the mouse crosses different UI) can undo a
-            // background app's hide within the same frame. No-ops without
-            // Accessibility trust -- see reassertCursorHidden().
-            reassertCursorHidden()
             laserDot.path = CGPath(ellipseIn: CGRect(x: local.x - Config.laserDotRadius,
                                                        y: local.y - Config.laserDotRadius,
                                                        width: Config.laserDotRadius * 2,
@@ -853,7 +705,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, AnnotationDrawing {
         isOn.toggle()
         Prefs.isOn = isOn
         sender.state = isOn ? .on : .off
-        updateCursorVisibility()
 
         // Annotate Mode already forces every pointer-effect layer hidden
         // independently of isOn -- don't fight that here.
@@ -885,11 +736,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, AnnotationDrawing {
         Prefs.effect = picked
         effectMenu?.items.forEach { $0.state = ($0.representedObject as? String == picked.rawValue) ? .on : .off }
         flashStatusItem(picked.rawValue)
-        if picked == .laser {
-            ensureAccessibilityAccess()
-            installCursorEventTap()
-        }
-        updateCursorVisibility()
 
         // Annotate Mode owns layer visibility while it's active (see
         // enterAnnotateMode/exitAnnotateMode) -- leave it alone here so a
@@ -935,7 +781,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, AnnotationDrawing {
         window.ignoresMouseEvents = false
         window.makeKey()   // lets Escape reach keyDown below, no permission needed
         annotateMenuItem?.state = .on
-        updateCursorVisibility()   // always show the real cursor while drawing
         flashStatusItem("Annotate On")
 
         CATransaction.begin()
@@ -954,7 +799,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, AnnotationDrawing {
         mode = .pointer
         window.ignoresMouseEvents = true
         annotateMenuItem?.state = .off
-        updateCursorVisibility()
         flashStatusItem("Annotate Off")
 
         CATransaction.begin()
