@@ -306,6 +306,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, AnnotationDrawing {
     private var clickMonitor: Any?
     private var hotKeyRefs: [EventHotKeyRef?] = []
     private var hotKeyActions: [UInt32: () -> Void] = [:]
+    private var eventTap: CFMachPort?
+    private var eventTapRunLoopSource: CFRunLoopSource?
 
     private var rippleContainer = CALayer()
     private var spotlightLayer = CAShapeLayer()
@@ -350,6 +352,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, AnnotationDrawing {
         for ref in hotKeyRefs {
             if let ref = ref { UnregisterEventHotKey(ref) }
         }
+        if let tap = eventTap { CGEvent.tapEnable(tap: tap, enable: false) }
         if cursorHidden { CGDisplayShowCursor(CGMainDisplayID()) }   // never leave the user's cursor hidden on quit
     }
 
@@ -401,6 +404,78 @@ final class AppDelegate: NSObject, NSApplicationDelegate, AnnotationDrawing {
         accessibilityPromptShown = true
         let promptKey = kAXTrustedCheckOptionPrompt.takeUnretainedValue() as NSString
         AXIsProcessTrustedWithOptions([promptKey: true] as CFDictionary)
+    }
+
+    /// Last resort for hiding the cursor: the timer-based reassertion in
+    /// tick() alone wasn't enough even with Accessibility trust, so this
+    /// listens for real mouse-moved events at the lowest level (HID, before
+    /// any window-server routing) and reasserts synchronously, on the spot,
+    /// rather than deferring to the next run-loop turn -- the theory being
+    /// that a background app's CGDisplayHideCursor call may only visually
+    /// stick while actively inside the OS's own processing of a mouse
+    /// event, not when called from an arbitrary timer.
+    ///
+    /// Safety: created with .listenOnly, which makes this tap structurally
+    /// incapable of blocking or dropping events -- Apple's API guarantees
+    /// that, it isn't just careful coding here. Worst case if this is
+    /// wrong: the cursor still doesn't hide, exactly like the last three
+    /// attempts. It can't hang mouse input to other apps.
+    ///
+    /// Idempotent and safe to call repeatedly (e.g. every time Laser
+    /// Pointer is picked) -- installs once and no-ops after.
+    private func installCursorEventTap() {
+        guard eventTap == nil, AXIsProcessTrusted() else { return }
+
+        let eventMask: CGEventMask =
+            (1 << CGEventType.mouseMoved.rawValue) |
+            (1 << CGEventType.leftMouseDragged.rawValue) |
+            (1 << CGEventType.rightMouseDragged.rawValue) |
+            (1 << CGEventType.otherMouseDragged.rawValue)
+
+        guard let tap = CGEvent.tapCreate(
+            tap: .cghidEventTap,
+            place: .headInsertEventTap,
+            options: .listenOnly,
+            eventsOfInterest: eventMask,
+            callback: { _, type, event, userInfo in
+                // Non-capturing C callback -- all context comes through
+                // userInfo. Never returns nil / never modifies event:
+                // always passes it straight through unchanged.
+                if let userInfo = userInfo {
+                    let delegate = Unmanaged<AppDelegate>.fromOpaque(userInfo).takeUnretainedValue()
+                    switch type {
+                    case .tapDisabledByTimeout, .tapDisabledByUserInput:
+                        delegate.reenableCursorEventTap()
+                    default:
+                        delegate.handleTapMouseMoved()
+                    }
+                }
+                return Unmanaged.passRetained(event)
+            },
+            userInfo: Unmanaged.passUnretained(self).toOpaque()
+        ) else { return }
+
+        guard let source = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0) else { return }
+        eventTap = tap
+        eventTapRunLoopSource = source
+        CFRunLoopAddSource(CFRunLoopGetMain(), source, .commonModes)
+        CGEvent.tapEnable(tap: tap, enable: true)
+    }
+
+    /// macOS auto-disables a tap that it judges too slow to keep up with
+    /// the event stream. Re-enable immediately if that happens -- cheap
+    /// insurance since our callback does almost nothing.
+    private func reenableCursorEventTap() {
+        guard let tap = eventTap else { return }
+        CGEvent.tapEnable(tap: tap, enable: true)
+    }
+
+    /// Fires on every real mouse-moved/dragged event, regardless of which
+    /// effect is currently selected -- gate here rather than by tearing
+    /// the tap down and rebuilding it each time the effect changes.
+    private func handleTapMouseMoved() {
+        guard isOn, mode == .pointer, effect == .laser else { return }
+        reassertCursorHidden()
     }
 
     // Union of every attached display, so one window covers the whole desk —
@@ -795,7 +870,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, AnnotationDrawing {
         Prefs.effect = picked
         effectMenu?.items.forEach { $0.state = ($0.representedObject as? String == picked.rawValue) ? .on : .off }
         flashStatusItem(picked.rawValue)
-        if picked == .laser { ensureAccessibilityAccess() }
+        if picked == .laser {
+            ensureAccessibilityAccess()
+            installCursorEventTap()
+        }
         updateCursorVisibility()
 
         // Annotate Mode owns layer visibility while it's active (see
