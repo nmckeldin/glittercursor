@@ -6,10 +6,9 @@ training. It overlays your whole desktop with:
 - **Cursor pointer effects** — Glitter (sparkle trail), Click Ripple
   (expanding ring on every click, great for showing remote viewers exactly
   where/when you clicked), Spotlight (dims everything except a circle
-  around your cursor), or Laser Pointer (a simple glowing tracking dot).
-  Laser Pointer additionally hides the system cursor so it's not
-  redundant with the dot — see the permissions note below, since this is
-  the one feature in the app that needs one.
+  around your cursor), or Laser Pointer (a bright glowing dot with a
+  white outline, sized to read clearly on its own — see the permissions
+  note below for why it doesn't also hide the system arrow next to it).
 - **Annotate Mode** — draw freehand on top of whatever you're presenting,
   in a choice of colors, with undo and clear-all.
 - **Hotkeys** to switch effects without touching the mouse, so you never
@@ -33,17 +32,23 @@ Annotate Mode itself still has no dedicated hotkey — reachable from the
 ✨ menu, or you can ask for one to be added the same way if you'd find it
 useful.)
 
-**One exception: Laser Pointer requests Accessibility access.** Every
-other effect and every other feature in this app needs zero permissions
-— but actually hiding the system cursor from a background/menu-bar-only
-app turns out to require it; without Accessibility trust, macOS silently
-ignores the hide request even though the underlying API call reports
-success. The first time you pick Laser Pointer (menu or ⌃⌥4), macOS will
-prompt you to grant it under System Settings → Privacy & Security →
-Accessibility. If you skip or decline that, Laser Pointer still works —
-the glowing dot tracks your cursor exactly the same — it just won't hide
-the system arrow next to it. Nothing else in the app is affected either
-way.
+**One exception: Laser Pointer requests Accessibility access,** in an
+attempt to also hide the system arrow next to the dot. It doesn't
+actually manage to — and after digging into why, that turns out to be
+structural, not a bug to keep chasing: cursor rendering at a given pixel
+belongs to whichever app's window is actually focused and under the
+cursor. Full-screen apps like QuickTime or Keynote can hide the cursor
+during playback because *they* are that app at that moment. Glitter's
+overlay is deliberately click-through, precisely so it never steals your
+interaction with whatever you're actually presenting — which means it's
+never the focused app, and so it can't claim cursor ownership either,
+no matter what permission it's granted. The Accessibility prompt (and
+the code behind it) stays in the app as a harmless best-effort attempt
+in case some future macOS version changes this, but the honest fallback
+is the dot's own visual weight: bright, glowing, white-outlined, sized
+to read clearly on its own even with the plain arrow sitting next to it.
+If you decline the Accessibility prompt, nothing else in the app is
+affected.
 
 ## Build & run
 

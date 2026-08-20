@@ -67,7 +67,7 @@ enum Config {
     // Click ripple / laser pointer
     static var rippleMaxRadius: CGFloat = d.tunable("rippleMaxRadius", 46)
     static var rippleDuration: Float = d.tunable("rippleDuration", 0.5)
-    static var laserDotRadius: CGFloat = d.tunable("laserDotRadius", 7)
+    static var laserDotRadius: CGFloat = d.tunable("laserDotRadius", 10)
 
     // Annotations
     static var annotationWidth: CGFloat = d.tunable("annotationWidth", 4)
@@ -515,10 +515,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, AnnotationDrawing {
         rippleContainer.frame = CGRect(origin: .zero, size: frame.size)
         rootLayer.addSublayer(rippleContainer)
 
+        // Since the system arrow next to it can't be hidden from a
+        // click-through background app (see updateCursorVisibility's
+        // doc comment), make the dot itself dominant enough that the
+        // small arrow stops mattering: a bright glow plus a thin white
+        // outline so it reads clearly against both light and dark content.
         laserDot.fillColor = pointerColor.cgColor
+        laserDot.strokeColor = NSColor.white.cgColor
+        laserDot.lineWidth = 1.5
         laserDot.shadowColor = pointerColor.cgColor
-        laserDot.shadowRadius = 8
-        laserDot.shadowOpacity = 0.9
+        laserDot.shadowRadius = 14
+        laserDot.shadowOpacity = 0.95
         laserDot.shadowOffset = .zero
         laserDot.isHidden = true
         rootLayer.addSublayer(laserDot)
