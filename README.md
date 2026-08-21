@@ -57,7 +57,9 @@ no rebuild needed.
 `Glitter.app` on GitHub's own macOS runners and uploads it as a
 downloadable artifact — a reproducible build with a public log showing
 exactly what commit and command produced it, rather than a binary built
-on someone's personal laptop. Go to this repo's **Actions** tab → the
+on someone's personal laptop. Both `build.sh` and the CI workflow build a
+**universal binary** (Apple Silicon + Intel), so it runs on any Mac
+regardless of which one built it. Go to this repo's **Actions** tab → the
 latest **Build Glitter.app** run → download the **Glitter** artifact
 (a zip containing the `.app`). Unzip it and you're ready to go straight
 to the first-launch step below.

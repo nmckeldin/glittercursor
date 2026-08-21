@@ -43,8 +43,16 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
 </plist>
 PLIST
 
-echo "Compiling..."
-swiftc -O main.swift -o "$APP/Contents/MacOS/$BIN"
+echo "Compiling (universal binary: arm64 + x86_64)..."
+# Built for both architectures explicitly, not just whatever machine runs
+# this script -- otherwise the binary only runs on the same CPU family it
+# was compiled on (e.g. a build made on an Apple Silicon CI runner won't
+# open at all on an Intel Mac, and vice versa: "not supported on this Mac").
+swiftc -O -target arm64-apple-macosx12.0 main.swift -o "$APP/Contents/MacOS/${BIN}-arm64"
+swiftc -O -target x86_64-apple-macosx12.0 main.swift -o "$APP/Contents/MacOS/${BIN}-x86_64"
+lipo -create -output "$APP/Contents/MacOS/$BIN" \
+  "$APP/Contents/MacOS/${BIN}-arm64" "$APP/Contents/MacOS/${BIN}-x86_64"
+rm "$APP/Contents/MacOS/${BIN}-arm64" "$APP/Contents/MacOS/${BIN}-x86_64"
 
 # Ad-hoc signature keeps macOS from complaining about an unsigned binary.
 # (No --deep: there's nothing nested in this bundle to sign recursively.)
