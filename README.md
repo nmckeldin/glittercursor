@@ -49,7 +49,18 @@ open Glitter.app
 ```
 
 Requires the Xcode command line tools (`xcode-select --install` if
-`swiftc` is missing).
+`swiftc` is missing). You only need to do this once — `Glitter.app` is a
+normal compiled app after that; `open Glitter.app` just launches it,
+no rebuild needed.
+
+**Don't want to build it yourself?** Every push to `main` also builds
+`Glitter.app` on GitHub's own macOS runners and uploads it as a
+downloadable artifact — a reproducible build with a public log showing
+exactly what commit and command produced it, rather than a binary built
+on someone's personal laptop. Go to this repo's **Actions** tab → the
+latest **Build Glitter.app** run → download the **Glitter** artifact
+(a zip containing the `.app`). Unzip it and you're ready to go straight
+to the first-launch step below.
 
 First launch: macOS will say it can't verify the developer — right-click
 `Glitter.app` → Open → confirm. After that it opens normally.

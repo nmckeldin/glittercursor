@@ -1,0 +1,31 @@
+name: Build Glitter.app
+
+# Builds Glitter.app on Apple's own macOS runners and uploads it as a
+# downloadable artifact — a reproducible, auditable build rather than
+# a binary built on someone's personal laptop. The build log shows
+# exactly what commit and what compile command produced it.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: {}   # lets you trigger a build manually from the Actions tab
+
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build
+        run: |
+          chmod +x build.sh
+          ./build.sh
+
+      - name: Zip app bundle
+        run: ditto -c -k --sequesterRsrc --keepParent Glitter.app Glitter.zip
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Glitter
+          path: Glitter.zip
+          retention-days: 90
